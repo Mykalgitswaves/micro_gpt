@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyTuple};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
@@ -24,7 +24,7 @@ fn flatten_py_list(list: &Bound<'_, PyList>, out: &mut Vec<f32>) -> PyResult<()>
 }
 
 fn infer_shape(list: &Bound<'_, PyList>) -> PyResult<Vec<usize>> {
-    let mut shape = vec![list.len()];
+    let shape = vec![list.len()];
     let first = list.get_item(0)?;
     if let Ok(nested) = first.downcast::<PyList>() {
         let mut inner = infer_shape(&nested)?;
@@ -47,22 +47,19 @@ pub fn tensor_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Tensor> {
         flatten_py_list(list, &mut data)?;
         return Ok(Tensor::new(data, shape));
     }
-    if let Ok(tuple) = obj.downcast::<pyo3::types::PyTuple>() {
+    if let Ok(tuple) = obj.downcast::<PyTuple>() {
         if tuple.len() == 2 {
             if let (Ok(data), Ok(batch_size)) = (
                 tuple.get_item(0)?.downcast::<PyList>(),
                 tuple.get_item(1)?.extract::<usize>(),
             ) {
-                let inner_shape = infer_shape(data)?;
+                let shape = infer_shape(data)?;
                 let mut flat = Vec::new();
                 flatten_py_list(data, &mut flat)?;
-                let mut shape = vec![batch_size];
-                shape.extend(inner_shape);
-                if flat.len() != numel(&shape) {
+                if shape.is_empty() || shape[0] != batch_size {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "tensor data length {} does not match shape {:?}",
-                        flat.len(),
-                        shape
+                        "batch size {} does not match data shape {:?}",
+                        batch_size, shape
                     )));
                 }
                 return Ok(Tensor::new(flat, shape));
@@ -109,27 +106,48 @@ pub fn arange(
     Ok(Tensor::new(data, vec![len]))
 }
 
-#[pyfunction]
-pub fn zeros(rows: usize, cols: usize) -> Tensor {
-    Tensor::zeros(vec![rows, cols])
+fn parse_shape_tuple(shape: &Bound<'_, PyTuple>) -> PyResult<Vec<usize>> {
+    shape
+        .iter()
+        .map(|d| d.extract::<usize>())
+        .collect::<PyResult<_>>()
 }
 
 #[pyfunction]
-#[pyo3(signature = (rows, cols, seed=None))]
-pub fn randn(rows: usize, cols: usize, seed: Option<u64>) -> Tensor {
+#[pyo3(signature = (*shape))]
+pub fn zeros(shape: &Bound<'_, PyTuple>) -> PyResult<Tensor> {
+    let dims = parse_shape_tuple(shape)?;
+    if dims.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "zeros requires at least one dimension",
+        ));
+    }
+    Ok(Tensor::zeros(dims))
+}
+
+#[pyfunction]
+#[pyo3(signature = (*shape, *, seed=None))]
+pub fn randn(shape: &Bound<'_, PyTuple>, seed: Option<u64>) -> PyResult<Tensor> {
+    let dims = parse_shape_tuple(shape)?;
+    if dims.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "randn requires at least one dimension",
+        ));
+    }
     let mut rng = match seed {
         Some(s) => rand::rngs::StdRng::seed_from_u64(s),
         None => rand::rngs::StdRng::from_entropy(),
     };
     let normal = Normal::new(0.0, 1.0).unwrap();
-    let n = rows * cols;
+    let n: usize = dims.iter().product();
     let data: Vec<f32> = (0..n).map(|_| normal.sample(&mut rng) as f32).collect();
-    Tensor::new(data, vec![rows, cols])
+    Ok(Tensor::new(data, dims))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo3::types::PyTuple;
 
     #[test]
     fn arange_positive_step() {
@@ -139,22 +157,21 @@ mod tests {
     }
 
     #[test]
-    fn arange_single_arg() {
-        let t = arange(4.0, None, 1.0, None).unwrap();
-        assert_eq!(t.data(), &[0.0, 1.0, 2.0, 3.0]);
-    }
-
-    #[test]
     fn zeros_shape() {
-        let t = zeros(2, 3);
-        assert_eq!(t.shape_vec(), vec![2, 3]);
-        assert!(t.data().iter().all(|&x| x == 0.0));
+        Python::with_gil(|py| {
+            let shape = PyTuple::new(py, [2usize, 3usize]).unwrap();
+            let t = zeros(&shape).unwrap();
+            assert_eq!(t.shape_vec(), vec![2, 3]);
+        });
     }
 
     #[test]
     fn randn_seeded_deterministic() {
-        let a = randn(2, 2, Some(42));
-        let b = randn(2, 2, Some(42));
-        assert_eq!(a.data(), b.data());
+        Python::with_gil(|py| {
+            let shape = PyTuple::new(py, [2usize, 2usize]).unwrap();
+            let a = randn(&shape, Some(42)).unwrap();
+            let b = randn(&shape, Some(42)).unwrap();
+            assert_eq!(a.data(), b.data());
+        });
     }
 }

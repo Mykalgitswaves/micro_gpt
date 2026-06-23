@@ -28,6 +28,16 @@ pub fn compute_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
+pub fn unravel_index(flat: usize, shape: &[usize]) -> Vec<usize> {
+    let mut coords = vec![0usize; shape.len()];
+    let mut rem = flat;
+    for d in (0..shape.len()).rev() {
+        coords[d] = rem % shape[d];
+        rem /= shape[d];
+    }
+    coords
+}
+
 pub fn numel(shape: &[usize]) -> usize {
     shape.iter().product()
 }
@@ -261,12 +271,31 @@ impl Tensor {
         crate::indexing::getitem(self, key)
     }
 
+    fn item(&self) -> PyResult<f32> {
+        if self.inner.data.len() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "item() requires a tensor with one element",
+            ));
+        }
+        Ok(self.inner.data[0])
+    }
+
+    fn sum(&self) -> PyResult<Tensor> {
+        let s: f32 = self.inner.data.iter().sum();
+        Ok(Tensor::new(vec![s], vec![]))
+    }
+
+    fn __iter__(&self) -> PyResult<Py<PyAny>> {
+        Python::with_gil(|py| {
+            let flat = self.inner.data.clone();
+            Ok(pyo3::types::PyList::new(py, flat)?.into())
+        })
+    }
+
     fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         crate::indexing::setitem(self, key, value)
     }
 }
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

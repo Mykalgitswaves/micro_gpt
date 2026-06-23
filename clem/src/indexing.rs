@@ -122,6 +122,13 @@ fn getitem_tuple(tensor: &Tensor, tuple: &Bound<'_, PyTuple>) -> PyResult<Tensor
     if shape.len() == 2 {
         let rows = &dim_coords[0];
         let cols = &dim_coords[1];
+        let all_int = tuple.iter().all(|item| {
+            item.is_none() || item.extract::<isize>().is_ok()
+        });
+        if all_int && rows.len() == 1 && cols.len() == 1 {
+            let v = tensor.data()[rows[0] * shape[1] + cols[0]];
+            return Ok(Tensor::new(vec![v], vec![]));
+        }
         let mut data = Vec::with_capacity(rows.len() * cols.len());
         for &r in rows {
             for &c in cols {

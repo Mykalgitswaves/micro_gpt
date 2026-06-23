@@ -24,8 +24,8 @@ def test_mul_backward():
     c = a * b
     c.backward()
     assert a.grad is not None
-    assert abs(a.grad[0] - 3.0) < 1e-3
-    assert abs(b.grad[0] - 2.0) < 1e-3
+        assert abs(a.grad[0].item() - 3.0) < 1e-3
+        assert abs(b.grad[0].item() - 2.0) < 1e-3
 
 
 def test_exp_backward():
@@ -33,7 +33,7 @@ def test_exp_backward():
     x.requires_grad_(True)
     y = clem.exp(x)
     y.backward()
-    assert abs(x.grad[0] - 2.7182817) < 1e-3
+    assert abs(x.grad[0].item() - 2.7182817) < 1e-3
 
 
 def test_matmul_backward():
@@ -59,10 +59,9 @@ def test_sgd_reduces_loss():
         loss = ((pred - y) * (pred - y)).sum()
         w.zero_grad()
         loss.backward()
-        w_data = w[0, 0] if hasattr(w[0, 0], "__float__") else w[0][0]
-        g = w.grad[0][0]
-        new_w = clem.tensor([[w_data - lr * g]])
-        w = new_w
+        w_data = w.item()
+        g = w.grad.item()
+        w = clem.tensor([[w_data - lr * g]])
         w.requires_grad_(True)
 
     final_pred = x.matmul(w)

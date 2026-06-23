@@ -25,7 +25,7 @@ def test_positional_encoding_fill():
     pe[:, 0::2] = clem.sin(pos * div_term)
     pe[:, 1::2] = clem.cos(pos * div_term)
     assert pe.shape == (max_seq_len, d_model)
-    assert pe[0, 0] == 0.0
+    assert pe[0, 0].item() == 0.0
 
 
 def test_positionally_encode_embeddings():

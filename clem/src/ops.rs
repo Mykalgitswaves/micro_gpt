@@ -22,14 +22,7 @@ fn coords_to_index(coords: &[usize], strides: &[usize]) -> usize {
 }
 
 fn unravel(flat: usize, shape: &[usize]) -> Vec<usize> {
-    let strides = compute_strides(shape);
-    let mut coords = vec![0; shape.len()];
-    let mut rem = flat;
-    for d in 0..shape.len() {
-        coords[d] = rem / strides[d];
-        rem %= strides[d];
-    }
-    coords
+    crate::tensor::unravel_index(flat, shape)
 }
 
 fn broadcast_input_index(out_coords: &[usize], out_shape: &[usize], in_shape: &[usize]) -> usize {

@@ -92,16 +92,10 @@ pub fn transpose(a: &Tensor, dim0: usize, dim1: usize) -> PyResult<Tensor> {
     new_shape.swap(dim0, dim1);
     let n = numel(&shape);
     let mut out = vec![0.0; n];
-    let strides = a.inner.strides.clone();
     let out_strides = crate::tensor::compute_strides(&new_shape);
-    let mut coords = vec![0usize; shape.len()];
 
     for flat in 0..n {
-        let mut rem = flat;
-        for d in (0..shape.len()).rev() {
-            coords[d] = rem / strides[d];
-            rem %= strides[d];
-        }
+        let coords = crate::tensor::unravel_index(flat, &shape);
         let mut swapped = coords.clone();
         swapped.swap(dim0, dim1);
         let dst_idx: usize = swapped

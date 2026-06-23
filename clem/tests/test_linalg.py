@@ -8,7 +8,7 @@ def test_matmul_2d(approx):
     out = a.matmul(b)
     ref = np.array([[1.0, 2.0], [3.0, 4.0]]) @ np.array([[2.0, 0.0], [1.0, 2.0]])
     assert out.shape == (2, 2)
-    for row_out, row_ref in zip(out, ref):
+    for row_out, row_ref in zip([[out[i, j].item() for j in range(2)] for i in range(2)], ref):
         for got, expected in zip(row_out, row_ref):
             assert approx(got, expected)
 

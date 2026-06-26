@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+use crate::broadcast::{broadcast_input_index, unravel};
 use crate::linalg::matmul as matmul_fn;
 use crate::tensor::{broadcast_shapes, numel, Tensor, TensorCore, TensorId};
 
@@ -19,6 +20,35 @@ pub enum GradFn {
     Matmul { a: Tensor, b: Tensor },
     Softmax { input: Tensor, dim: usize },
     Gelu { input: Tensor },
+    Sum { input: Tensor },
+    Where {
+        cond: Tensor,
+        x: Tensor,
+        y: Tensor,
+    },
+    CrossEntropy {
+        logits: Tensor,
+        targets: Tensor,
+        ignore_index: Option<i32>,
+        num_valid: usize,
+    },
+}
+
+pub fn track_cross_entropy(
+    out: &Tensor,
+    logits: &Tensor,
+    targets: &Tensor,
+    ignore_index: Option<i32>,
+    num_valid: usize,
+) {
+    if should_track(logits) {
+        *out.inner.grad_fn.borrow_mut() = Some(GradFn::CrossEntropy {
+            logits: logits.clone(),
+            targets: targets.clone(),
+            ignore_index,
+            num_valid,
+        });
+    }
 }
 
 pub fn accumulate_grad(cell: &std::cell::RefCell<Option<Vec<f32>>>, grad: &[f32]) {
@@ -36,27 +66,38 @@ pub fn accumulate_grad(cell: &std::cell::RefCell<Option<Vec<f32>>>, grad: &[f32]
 }
 
 pub fn track_unary(out: &Tensor, input: &Tensor, grad_fn: GradFn) {
-    if *input.inner.requires_grad.borrow() || *out.inner.requires_grad.borrow() {
+    if should_track(input) || should_track(out) {
         *out.inner.grad_fn.borrow_mut() = Some(grad_fn);
     }
 }
 
 pub fn track_binary(out: &Tensor, lhs: &Tensor, rhs: &Tensor, make_fn: fn(Tensor, Tensor) -> GradFn) {
-    if *lhs.inner.requires_grad.borrow()
-        || *rhs.inner.requires_grad.borrow()
-        || *out.inner.requires_grad.borrow()
-    {
+    if should_track(lhs) || should_track(rhs) || should_track(out) {
         *out.inner.grad_fn.borrow_mut() = Some(make_fn(lhs.clone(), rhs.clone()));
     }
 }
 
 pub fn track_matmul(out: &Tensor, a: &Tensor, b: &Tensor) {
-    if *a.inner.requires_grad.borrow() || *b.inner.requires_grad.borrow() {
+    if should_track(a) || should_track(b) {
         *out.inner.grad_fn.borrow_mut() = Some(GradFn::Matmul {
             a: a.clone(),
             b: b.clone(),
         });
     }
+}
+
+pub fn track_where(out: &Tensor, cond: &Tensor, x: &Tensor, y: &Tensor) {
+    if should_track(x) || should_track(y) || should_track(out) {
+        *out.inner.grad_fn.borrow_mut() = Some(GradFn::Where {
+            cond: cond.clone(),
+            x: x.clone(),
+            y: y.clone(),
+        });
+    }
+}
+
+fn should_track(t: &Tensor) -> bool {
+    *t.inner.requires_grad.borrow() || t.inner.grad_fn.borrow().is_some()
 }
 
 fn sum_to_shape(grad: &[f32], grad_shape: &[usize], target_shape: &[usize]) -> Vec<f32> {
@@ -211,6 +252,63 @@ fn apply_grad_fn(node: &Tensor, grad: &[f32]) -> PyResult<Vec<(Tensor, Vec<f32>)
             let shape = input.shape_vec();
             Ok(vec![(input, sum_to_shape(&g, &node.shape_vec(), &shape))])
         }
+        Some(GradFn::Sum { input }) => {
+            let scalar = grad[0];
+            let g = vec![scalar; input.data().len()];
+            Ok(vec![(input, g)])
+        }
+        Some(GradFn::CrossEntropy {
+            logits,
+            targets,
+            ignore_index,
+            num_valid,
+        }) => {
+            let shape = logits.shape_vec();
+            let (n, c) = (shape[0], shape[1]);
+            let scale = grad[0] / num_valid as f32;
+            let logits_data = logits.data();
+            let targets_data = targets.data();
+            let mut g = vec![0.0; n * c];
+
+            for row in 0..n {
+                let target = targets_data[row] as i32;
+                if ignore_index.is_some_and(|ig| target == ig) {
+                    continue;
+                }
+                let target_class = target as usize;
+                let row_start = row * c;
+                let row_slice = &logits_data[row_start..row_start + c];
+                let max = row_slice
+                    .iter()
+                    .cloned()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let sum_exp: f32 = row_slice.iter().map(|&x| (x - max).exp()).sum();
+                for class in 0..c {
+                    let prob = (row_slice[class] - max).exp() / sum_exp;
+                    g[row_start + class] = scale * prob;
+                }
+                g[row_start + target_class] -= scale;
+            }
+            Ok(vec![(logits, g)])
+        }
+        Some(GradFn::Where { cond, x, y }) => {
+            let out_shape = node.shape_vec();
+            let cond_shape = cond.shape_vec();
+            let x_shape = x.shape_vec();
+            let y_shape = y.shape_vec();
+            let mut grad_x = vec![0.0; x.data().len()];
+            let mut grad_y = vec![0.0; y.data().len()];
+            for flat in 0..grad.len() {
+                let out_coords = unravel(flat, &out_shape);
+                let c_idx = broadcast_input_index(&out_coords, &out_shape, &cond_shape);
+                let c = if cond.data()[c_idx] != 0.0 { 1.0 } else { 0.0 };
+                let x_idx = broadcast_input_index(&out_coords, &out_shape, &x_shape);
+                let y_idx = broadcast_input_index(&out_coords, &out_shape, &y_shape);
+                grad_x[x_idx] += grad[flat] * c;
+                grad_y[y_idx] += grad[flat] * (1.0 - c);
+            }
+            Ok(vec![(x, grad_x), (y, grad_y)])
+        }
     }
 }
 
@@ -292,45 +390,49 @@ fn broadcast_index(out_coords: &[usize], shape: &[usize], strides: &[usize]) -> 
     idx
 }
 
-fn collect_nodes(root: &Tensor) -> Vec<Tensor> {
+fn grad_parents(gf: &GradFn) -> Vec<Tensor> {
+    match gf {
+        GradFn::Leaf => vec![],
+        GradFn::Add { lhs, rhs }
+        | GradFn::Sub { lhs, rhs }
+        | GradFn::Mul { lhs, rhs }
+        | GradFn::Div { lhs, rhs } => vec![lhs.clone(), rhs.clone()],
+        GradFn::Matmul { a, b } => vec![a.clone(), b.clone()],
+        GradFn::Neg { input }
+        | GradFn::Exp { input }
+        | GradFn::Log { input }
+        | GradFn::Sin { input }
+        | GradFn::Cos { input }
+        | GradFn::Softmax { input, .. }
+        | GradFn::Gelu { input }
+        | GradFn::Sum { input } => vec![input.clone()],
+        GradFn::Where { x, y, .. } => vec![x.clone(), y.clone()],
+        GradFn::CrossEntropy { logits, .. } => vec![logits.clone()],
+    }
+}
+
+fn topo_sort(root: &Tensor) -> Vec<Tensor> {
     let mut visited = HashSet::new();
     let mut order = Vec::new();
-    let mut stack = vec![root.clone()];
 
-    while let Some(node) = stack.pop() {
+    fn visit(node: &Tensor, visited: &mut HashSet<TensorId>, order: &mut Vec<Tensor>) {
         if !visited.insert(node.inner.id) {
-            continue;
+            return;
         }
-        if let Some(ref gf) = *node.inner.grad_fn.borrow() {
-            let parents = match gf {
-                GradFn::Leaf => vec![],
-                GradFn::Add { lhs, rhs }
-                | GradFn::Sub { lhs, rhs }
-                | GradFn::Mul { lhs, rhs }
-                | GradFn::Div { lhs, rhs } => vec![lhs.clone(), rhs.clone()],
-                GradFn::Matmul { a, b } => vec![a.clone(), b.clone()],
-                GradFn::Neg { input }
-                | GradFn::Exp { input }
-                | GradFn::Log { input }
-                | GradFn::Sin { input }
-                | GradFn::Cos { input }
-                | GradFn::Softmax { input, .. }
-                | GradFn::Gelu { input } => vec![input.clone()],
-            };
-            for p in parents {
-                if !visited.contains(&p.inner.id) {
-                    stack.push(p);
-                }
+        if let Some(gf) = node.inner.grad_fn.borrow().clone() {
+            for parent in grad_parents(&gf) {
+                visit(&parent, visited, order);
             }
         }
-        order.push(node);
+        order.push(node.clone());
     }
-    order.reverse();
+
+    visit(root, &mut visited, &mut order);
     order
 }
 
 pub fn backward(root: &Tensor) -> PyResult<()> {
-    let nodes = collect_nodes(root);
+    let nodes = topo_sort(root);
     let mut grads: HashMap<TensorId, Vec<f32>> = HashMap::new();
     grads.insert(root.inner.id, vec![1.0; root.data().len().max(1)]);
 
@@ -344,17 +446,17 @@ pub fn backward(root: &Tensor) -> PyResult<()> {
         }
         let parent_grads = apply_grad_fn(node, &grad)?;
         for (parent, g) in parent_grads {
-            if *parent.inner.requires_grad.borrow() {
-                match grads.get_mut(&parent.inner.id) {
-                    Some(existing) => {
-                        for (e, v) in existing.iter_mut().zip(g.iter()) {
-                            *e += v;
-                        }
-                    }
-                    None => {
-                        grads.insert(parent.inner.id, g.clone());
+            match grads.get_mut(&parent.inner.id) {
+                Some(existing) => {
+                    for (e, v) in existing.iter_mut().zip(g.iter()) {
+                        *e += v;
                     }
                 }
+                None => {
+                    grads.insert(parent.inner.id, g.clone());
+                }
+            }
+            if *parent.inner.requires_grad.borrow() {
                 parent.inner.accumulate_grad(&grads[&parent.inner.id]);
             }
         }

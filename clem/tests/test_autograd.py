@@ -24,8 +24,8 @@ def test_mul_backward():
     c = a * b
     c.backward()
     assert a.grad is not None
-        assert abs(a.grad[0].item() - 3.0) < 1e-3
-        assert abs(b.grad[0].item() - 2.0) < 1e-3
+    assert abs(a.grad[0].item() - 3.0) < 1e-3
+    assert abs(b.grad[0].item() - 2.0) < 1e-3
 
 
 def test_exp_backward():
@@ -47,6 +47,31 @@ def test_matmul_backward():
     assert b.grad is not None
 
 
+def test_cross_entropy_reduces_loss():
+    logits = clem.tensor([[2.0, 0.0], [2.0, 0.0]])
+    targets = clem.tensor([0.0, 0.0])
+    logits.requires_grad_(True)
+    lr = 0.5
+
+    for _ in range(5):
+        loss = clem.cross_entropy(logits, targets)
+        logits.zero_grad()
+        loss.backward()
+        rows = []
+        for row in range(2):
+            rows.append(
+                [
+                    logits[row, i].item() - lr * logits.grad[row, i].item()
+                    for i in range(2)
+                ]
+            )
+        logits = clem.tensor(rows)
+        logits.requires_grad_(True)
+
+    final_loss = clem.cross_entropy(logits, targets)
+    assert final_loss.item() < 0.5
+
+
 def test_sgd_reduces_loss():
     x = clem.tensor([[1.0], [2.0]])
     y = clem.tensor([[3.0], [5.0]])
@@ -65,5 +90,30 @@ def test_sgd_reduces_loss():
         w.requires_grad_(True)
 
     final_pred = x.matmul(w)
-    err = sum((final_pred[i][0] - y[i][0]) ** 2 for i in range(2))
+    err = sum((final_pred[i, 0].item() - y[i, 0].item()) ** 2 for i in range(2))
     assert err < 5.0
+
+
+def test_where_backward():
+    cond = clem.tensor([1.0, 0.0])
+    x = clem.tensor([3.0, 3.0])
+    y = clem.tensor([1.0, 2.0])
+    x.requires_grad_(True)
+    y.requires_grad_(True)
+    out = clem.where(cond, x, y)
+    out.sum().backward()
+    assert abs(x.grad[0].item() - 1.0) < 1e-3
+    assert abs(x.grad[1].item() - 0.0) < 1e-3
+    assert abs(y.grad[0].item() - 0.0) < 1e-3
+    assert abs(y.grad[1].item() - 1.0) < 1e-3
+
+
+def test_masked_fill_backward():
+    t = clem.tensor([1.0, 2.0, 3.0])
+    mask = clem.tensor([1.0, 0.0, 1.0])
+    t.requires_grad_(True)
+    out = t.masked_fill(mask, 5.0)
+    out.sum().backward()
+    assert abs(t.grad[0].item() - 0.0) < 1e-3
+    assert abs(t.grad[1].item() - 1.0) < 1e-3
+    assert abs(t.grad[2].item() - 0.0) < 1e-3

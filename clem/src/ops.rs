@@ -1,70 +1,8 @@
 use pyo3::prelude::*;
 
-use crate::autograd::{GradFn, track_binary, track_unary};
-use crate::tensor::{broadcast_shapes, compute_strides, numel, Tensor, TensorCore};
-
-fn tensor_from_any(obj: &Bound<'_, PyAny>) -> PyResult<Tensor> {
-    if let Ok(t) = obj.extract::<Tensor>() {
-        Ok(t)
-    } else if let Ok(v) = obj.extract::<f32>() {
-        Ok(Tensor::new(vec![v], vec![]))
-    } else if let Ok(v) = obj.extract::<i64>() {
-        Ok(Tensor::new(vec![v as f32], vec![]))
-    } else {
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "expected Tensor or numeric scalar",
-        ))
-    }
-}
-
-fn coords_to_index(coords: &[usize], strides: &[usize]) -> usize {
-    coords.iter().zip(strides.iter()).map(|(&c, &s)| c * s).sum()
-}
-
-fn unravel(flat: usize, shape: &[usize]) -> Vec<usize> {
-    crate::tensor::unravel_index(flat, shape)
-}
-
-fn broadcast_input_index(out_coords: &[usize], out_shape: &[usize], in_shape: &[usize]) -> usize {
-    let offset = out_shape.len().saturating_sub(in_shape.len());
-    let mut in_coords = vec![0; in_shape.len()];
-    for (i, &dim) in in_shape.iter().enumerate() {
-        let oc = out_coords[i + offset];
-        in_coords[i] = if dim == 1 { 0 } else { oc };
-    }
-    coords_to_index(&in_coords, &compute_strides(in_shape))
-}
-
-fn broadcast_binary<F>(a: &Tensor, b: &Tensor, op: F, grad_fn: fn(Tensor, Tensor) -> GradFn) -> PyResult<Tensor>
-where
-    F: Fn(f32, f32) -> f32,
-{
-    let a_shape = a.shape_vec();
-    let b_shape = b.shape_vec();
-    let out_shape = broadcast_shapes(&a_shape, &b_shape)
-        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
-    let out_n = numel(&out_shape);
-    let mut out_data = vec![0.0; out_n];
-
-    for flat in 0..out_n {
-        let out_coords = unravel(flat, &out_shape);
-        let a_idx = if a_shape.is_empty() {
-            0
-        } else {
-            broadcast_input_index(&out_coords, &out_shape, &a_shape)
-        };
-        let b_idx = if b_shape.is_empty() {
-            0
-        } else {
-            broadcast_input_index(&out_coords, &out_shape, &b_shape)
-        };
-        out_data[flat] = op(a.data()[a_idx], b.data()[b_idx]);
-    }
-
-    let out = Tensor::from_core(TensorCore::new(out_data, out_shape));
-    track_binary(&out, a, b, grad_fn);
-    Ok(out)
-}
+use crate::autograd::{GradFn, track_unary};
+use crate::broadcast::{broadcast_binary, tensor_from_any};
+use crate::tensor::{Tensor, TensorCore};
 
 fn map_unary(a: &Tensor, f: fn(f32) -> f32, grad: GradFn) -> PyResult<Tensor> {
     let data: Vec<f32> = a.data().iter().map(|&x| f(x)).collect();
@@ -121,6 +59,8 @@ pub fn div(a: &Tensor, other: &Bound<'_, PyAny>) -> PyResult<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autograd::GradFn;
+    use crate::broadcast::broadcast_binary;
     use crate::tensor::TensorCore;
 
     #[test]

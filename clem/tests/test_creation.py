@@ -25,6 +25,12 @@ def test_zeros():
     assert t.shape == (2, 3)
 
 
+def test_randn_seeded():
+    a = clem.randn(2, 2, seed=42)
+    b = clem.randn(2, 2, seed=42)
+    assert a.shape == b.shape
+
+
 def test_reshape():
     t = clem.tensor([[1.0, 2.0], [3.0, 4.0]]).reshape(4)
     assert t.shape == (4,)

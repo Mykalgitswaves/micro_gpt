@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
 
-use crate::autograd::{GradFn, track_unary};
+use crate::autograd::{track_cross_entropy, GradFn, track_unary};
 use crate::tensor::{numel, Tensor, TensorCore};
 
 pub fn softmax(a: &Tensor, dim: isize) -> PyResult<Tensor> {
@@ -129,6 +129,76 @@ pub fn dropout(tensor: &Tensor, p: f32, seed: Option<u64>) -> PyResult<Tensor> {
     Ok(Tensor::from_core(TensorCore::new(data, tensor.shape_vec())))
 }
 
+/// Cross-entropy loss for next-token classification.
+///
+/// - `logits`: model output scores, shape `(N, C)` — from `output_head`, one row per token position.
+/// - `targets`: ground-truth class indices, shape `(N,)` — token IDs (e.g. shifted `idx_tensor`).
+/// - `ignore_index`: skip positions where target equals this value (e.g. padding token id).
+///
+/// Returns a scalar mean loss over non-ignored positions.
+#[pyfunction]
+#[pyo3(signature = (logits, targets, ignore_index=None))]
+pub fn cross_entropy(
+    logits: &Tensor,
+    targets: &Tensor,
+    ignore_index: Option<i32>,
+) -> PyResult<Tensor> {
+    let logit_shape = logits.shape_vec();
+    if logit_shape.len() != 2 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "cross_entropy expects 2D logits (N, C)",
+        ));
+    }
+    let (n, c) = (logit_shape[0], logit_shape[1]);
+    if numel(&targets.shape_vec()) != n {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "targets must have N={} elements, got shape {:?}",
+            n,
+            targets.shape_vec()
+        )));
+    }
+
+    let logits_data = logits.data();
+    let targets_data = targets.data();
+    let mut loss_sum = 0.0f32;
+    let mut num_valid = 0usize;
+
+    for row in 0..n {
+        let target = targets_data[row] as i32;
+        if ignore_index.is_some_and(|ig| target == ig) {
+            continue;
+        }
+        let target_class = target as usize;
+        if target_class >= c {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "target index {} out of range for {} classes",
+                target_class, c
+            )));
+        }
+
+        let row_start = row * c;
+        let row_slice = &logits_data[row_start..row_start + c];
+        let max = row_slice
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let log_sum_exp = max + row_slice.iter().map(|&x| (x - max).exp()).sum::<f32>().ln();
+        loss_sum -= row_slice[target_class] - log_sum_exp;
+        num_valid += 1;
+    }
+
+    if num_valid == 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "cross_entropy: no valid targets after applying ignore_index",
+        ));
+    }
+
+    let loss = loss_sum / num_valid as f32;
+    let out = Tensor::from_core(TensorCore::new(vec![loss], vec![]));
+    track_cross_entropy(&out, logits, targets, ignore_index, num_valid);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +235,14 @@ mod tests {
         let a = dropout(&t, 0.5, Some(123)).unwrap();
         let b = dropout(&t, 0.5, Some(123)).unwrap();
         assert_eq!(a.data(), b.data());
+    }
+
+    #[test]
+    fn cross_entropy_known_value() {
+        // two classes, one sample: logits favor class 1, target is class 1 -> low loss
+        let logits = Tensor::from_core(TensorCore::new(vec![0.0, 2.0], vec![1, 2]));
+        let targets = Tensor::from_core(TensorCore::new(vec![1.0], vec![1]));
+        let loss = cross_entropy(&logits, &targets, None).unwrap();
+        assert!(loss.data()[0] < 0.5);
     }
 }

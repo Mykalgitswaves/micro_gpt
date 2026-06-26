@@ -125,15 +125,7 @@ pub fn zeros(shape: &Bound<'_, PyTuple>) -> PyResult<Tensor> {
     Ok(Tensor::zeros(dims))
 }
 
-#[pyfunction]
-#[pyo3(signature = (*shape, *, seed=None))]
-pub fn randn(shape: &Bound<'_, PyTuple>, seed: Option<u64>) -> PyResult<Tensor> {
-    let dims = parse_shape_tuple(shape)?;
-    if dims.is_empty() {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "randn requires at least one dimension",
-        ));
-    }
+fn randn_with_shape(dims: Vec<usize>, seed: Option<u64>) -> Tensor {
     let mut rng = match seed {
         Some(s) => rand::rngs::StdRng::seed_from_u64(s),
         None => rand::rngs::StdRng::from_entropy(),
@@ -141,7 +133,19 @@ pub fn randn(shape: &Bound<'_, PyTuple>, seed: Option<u64>) -> PyResult<Tensor> 
     let normal = Normal::new(0.0, 1.0).unwrap();
     let n: usize = dims.iter().product();
     let data: Vec<f32> = (0..n).map(|_| normal.sample(&mut rng) as f32).collect();
-    Ok(Tensor::new(data, dims))
+    Tensor::new(data, dims)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*shape, seed=None))]
+pub fn randn(shape: &Bound<'_, PyTuple>, seed: Option<u64>) -> PyResult<Tensor> {
+    let dims = parse_shape_tuple(shape)?;
+    if dims.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "randn requires at least one dimension",
+        ));
+    }
+    Ok(randn_with_shape(dims, seed))
 }
 
 #[cfg(test)]
@@ -158,20 +162,14 @@ mod tests {
 
     #[test]
     fn zeros_shape() {
-        Python::with_gil(|py| {
-            let shape = PyTuple::new(py, [2usize, 3usize]).unwrap();
-            let t = zeros(&shape).unwrap();
-            assert_eq!(t.shape_vec(), vec![2, 3]);
-        });
+        let t = Tensor::zeros(vec![2, 3]);
+        assert_eq!(t.shape_vec(), vec![2, 3]);
     }
 
     #[test]
     fn randn_seeded_deterministic() {
-        Python::with_gil(|py| {
-            let shape = PyTuple::new(py, [2usize, 2usize]).unwrap();
-            let a = randn(&shape, Some(42)).unwrap();
-            let b = randn(&shape, Some(42)).unwrap();
-            assert_eq!(a.data(), b.data());
-        });
+        let a = randn_with_shape(vec![2, 2], Some(42));
+        let b = randn_with_shape(vec![2, 2], Some(42));
+        assert_eq!(a.data(), b.data());
     }
 }

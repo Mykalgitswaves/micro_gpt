@@ -16,7 +16,7 @@ def test_slice_even_odd_columns():
     t[:, 1::2] = odd
     assert t[0, 0].item() == 1.0
     assert t[0, 1].item() == 7.0
-    assert t[0, 2] == 2.0
+    assert t[0, 2].item() == 2.0
 
 
 def test_row_slice():

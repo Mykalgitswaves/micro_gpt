@@ -15,8 +15,8 @@ def test_positional_encoding_div_term(approx):
     div_term = clem.exp(-i / d_model * clem.log(clem.tensor(10000.0)))
     ref = np.exp(-np.arange(0, d_model, 2) / d_model * np.log(10000.0))
     assert approx(list(div_term.shape), [d_model // 2])
-    for got, expected in zip(list(div_term), ref):
-        assert approx(got, float(expected))
+    for i in range(d_model // 2):
+        assert approx(div_term[i].item(), float(ref[i]))
 
 
 def test_pos_broadcast_shape():

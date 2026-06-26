@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::autograd::{accumulate_grad, GradFn};
+use crate::autograd::{accumulate_grad, track_unary, GradFn};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -282,18 +282,48 @@ impl Tensor {
 
     fn sum(&self) -> PyResult<Tensor> {
         let s: f32 = self.inner.data.iter().sum();
-        Ok(Tensor::new(vec![s], vec![]))
+        let out = Tensor::new(vec![s], vec![]);
+        track_unary(&out, self, GradFn::Sum { input: self.clone() });
+        Ok(out)
     }
 
-    fn __iter__(&self) -> PyResult<Py<PyAny>> {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         Python::with_gil(|py| {
-            let flat = self.inner.data.clone();
-            Ok(pyo3::types::PyList::new(py, flat)?.into())
+            let list = pyo3::types::PyList::new(py, slf.inner.data.clone())?;
+            Ok(list.call_method0("__iter__")?.into())
         })
     }
 
     fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         crate::indexing::setitem(self, key, value)
+    }
+
+    fn eq(&self, other: &Bound<'_, PyAny>) -> PyResult<Tensor> {
+        crate::compare::eq(self, other)
+    }
+
+    fn ne(&self, other: &Bound<'_, PyAny>) -> PyResult<Tensor> {
+        crate::compare::ne(self, other)
+    }
+
+    fn gt(&self, other: &Bound<'_, PyAny>) -> PyResult<Tensor> {
+        crate::compare::gt(self, other)
+    }
+
+    fn ge(&self, other: &Bound<'_, PyAny>) -> PyResult<Tensor> {
+        crate::compare::ge(self, other)
+    }
+
+    fn lt(&self, other: &Bound<'_, PyAny>) -> PyResult<Tensor> {
+        crate::compare::lt(self, other)
+    }
+
+    fn le(&self, other: &Bound<'_, PyAny>) -> PyResult<Tensor> {
+        crate::compare::le(self, other)
+    }
+
+    fn masked_fill(&self, mask: &Tensor, value: f32) -> PyResult<Tensor> {
+        crate::mask::masked_fill(self, mask, value)
     }
 }
 mod tests {
